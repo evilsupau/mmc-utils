@@ -26,8 +26,6 @@
 
 #include "mmc_cmds.h"
 
-#define MMC_VERSION	"0.1"
-
 #define BASIC_HELP 0
 #define ADVANCED_HELP 1
 
@@ -56,6 +54,11 @@ static struct Command commands[] = {
 	{ do_read_extcsd, -1,
 	  "extcsd read", "<device>\n"
 		"Print extcsd data from <device>.",
+	  NULL
+	},
+	{ do_write_extcsd, 3,
+	  "extcsd write", "<offset> <value> <device>\n"
+		  "Write <value> at offset <offset> to <device>'s extcsd.",
 	  NULL
 	},
 	{ do_writeprotect_boot_get, -1,
@@ -150,7 +153,7 @@ static struct Command commands[] = {
 	  NULL
 	},
 	{ do_sanitize, -1,
-	  "sanitize", "<device>\n"
+	  "sanitize", "<device> [timeout_ms]\n"
 		"Send Sanitize command to the <device>.\nThis will delete the unmapped memory region of the device.",
 	  NULL
 	},
@@ -225,8 +228,10 @@ static struct Command commands[] = {
 	  NULL
 	},
 	{ do_ffu, -2,
-	  "ffu", "<image name> <device>\n"
-		"Run Field Firmware Update with <image name> on <device>.\n",
+	  "ffu", "<image name> <device> [chunk-bytes]\n"
+		"Run Field Firmware Update with <image name> on <device>.\n"
+		"[chunk-bytes] is optional and defaults to its max - 512k. "
+		"should be in decimal bytes and sector aligned.\n",
 	  NULL
 	},
 	{ do_erase, -4,
@@ -244,6 +249,28 @@ static struct Command commands[] = {
 		"must be a 32-bit hexadecimal number, prefixed with 0x/0X. And bit0 in [arg] must\n"
 		"be 1.",
 	NULL
+	},
+	{ do_softreset, -1,
+	  "softreset", "<device>\n"
+	  "Issues a CMD0 softreset, e.g. for testing if hardware reset for UHS works",
+	  NULL
+	},
+	{ do_preidle, -1,
+	  "preidle", "<device>\n"
+	  "Issues a CMD0 GO_PRE_IDLE",
+	  NULL
+	},
+	{ do_alt_boot_op, -1,
+	  "boot_operation", "<boot_data_file> <device>\n"
+	  "Does the alternative boot operation and writes the specified starting blocks of boot data into the requested file.\n\n"
+	  "Note some limitations\n:"
+	  "1. The boot operation must be configured, e.g. for legacy speed:\n"
+	  "mmc-utils bootbus set single_backward retain x8 /dev/mmcblk2\n"
+	  "mmc-utils bootpart enable 1 0 /dev/mmcblk2\n"
+	  "2. The MMC must currently be running at the bus mode that is configured for the boot operation (HS200 and HS400 not supported at all).\n"
+	  "3. Only up to 512K bytes of boot data will be transferred.\n"
+	  "4. The MMC will perform a soft reset, if your system cannot handle that do not use the boot operation from mmc-utils.\n",
+	  NULL
 	},
 	{ 0, 0, 0, 0 }
 };
@@ -292,7 +319,7 @@ static void help(char *np)
 
 	printf("\n\t%s help|--help|-h\n\t\tShow the help.\n",np);
 	printf("\n\t%s <cmd> --help\n\t\tShow detailed help for a command or subset of commands.\n",np);
-	printf("\n%s\n", MMC_VERSION);
+	printf("\n%s\n", VERSION);
 }
 
 static int split_command(char *cmd, char ***commands)
@@ -473,7 +500,7 @@ static int parse_args(int argc, char **argv,
 	}
 
 	if(helprequested){
-		printf("\n%s\n", MMC_VERSION);
+		printf("\n%s\n", VERSION);
 		return 0;
 	}
 
