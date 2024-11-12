@@ -1,5 +1,7 @@
 CC ?= gcc
-AM_CFLAGS = -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2
+GIT_VERSION := "$(shell git describe --abbrev=6 --always --tags)"
+AM_CFLAGS = -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2 \
+	    -DVERSION=\"$(GIT_VERSION)\"
 CFLAGS ?= -g -O2
 objects = \
 	mmc.o \
@@ -19,15 +21,17 @@ prefix ?= /usr/local
 bindir = $(prefix)/bin
 LIBS=
 RESTORE_LIBS=
+mandir = /usr/share/man
 
 progs = mmc
 
-# make C=1 to enable sparse
+# make C=1 to enable sparse - default
+C ?= 1
 ifdef C
-	check = sparse $(CHECKFLAGS)
+	check = sparse $(CHECKFLAGS) $(AM_CFLAGS)
 endif
 
-all: $(progs) manpages
+all: $(progs)
 
 .c.o:
 ifdef C
@@ -41,17 +45,21 @@ mmc: $(objects)
 manpages:
 	$(MAKE) -C man
 
-install-man:
-	$(MAKE) -C man install
-
 clean:
 	rm -f $(progs) $(objects)
 	$(MAKE) -C man clean
+	$(MAKE) -C docs clean
 
-install: $(progs) install-man
+install: $(progs)
 	$(INSTALL) -m755 -d $(DESTDIR)$(bindir)
 	$(INSTALL) $(progs) $(DESTDIR)$(bindir)
+	$(INSTALL) -m755 -d $(DESTDIR)$(mandir)/man1
+	$(INSTALL) -m 644 mmc.1 $(DESTDIR)$(mandir)/man1
 
 -include $(foreach obj,$(objects), $(dir $(obj))/.$(notdir $(obj)).d)
 
 .PHONY: all clean install manpages install-man
+
+# Add this new target for building HTML documentation using docs/Makefile
+html-docs:
+	$(MAKE) -C docs html

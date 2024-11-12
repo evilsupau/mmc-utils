@@ -47,22 +47,26 @@
 #include <unistd.h>
 
 #include "mmc.h"
+#include "mmc_cmds.h"
 
 #define MASKTOBIT0(high)	\
 	((high >= 0) ? ((1ull << ((high) + 1ull)) - 1ull) : 0ull)
 #define MASK(high, low)		(MASKTOBIT0(high) & ~MASKTOBIT0(low - 1))
 #define BITS(value, high, low)	(((value) & MASK((high), (low))) >> (low))
 #define IDS_MAX			256
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+enum bus_type {
+	MMC = 1,
+	SD,
+};
 
 struct config {
 	char *idsfile;
 	char *dir;
 	bool verbose;
-	int interfaces;
-	char **interface;
-	char **mmc_ids;
-	char **sd_ids;
 
+	enum bus_type bus;
 	char *type;
 	char *cid;
 	char *csd;
@@ -74,190 +78,161 @@ enum REG_TYPE {
 	CID = 0,
 	CSD,
 	SCR,
-	EXT_CSD,
 };
 
 struct ids_database {
-	char *type;
 	int id;
 	char *manufacturer;
 };
 
-struct ids_database database[] = {
+static struct ids_database sd_database[] = {
 	{
-		.type = "sd",
 		.id = 0x01,
 		.manufacturer = "Panasonic",
 	},
 	{
-		.type = "sd",
 		.id = 0x02,
 		.manufacturer = "Toshiba/Kingston/Viking",
 	},
 	{
-		.type = "sd",
 		.id = 0x03,
 		.manufacturer = "SanDisk",
 	},
 	{
-		.type = "sd",
 		.id = 0x08,
 		.manufacturer = "Silicon Power",
 	},
 	{
-		.type = "sd",
 		.id = 0x18,
 		.manufacturer = "Infineon",
 	},
 	{
-		.type = "sd",
 		.id = 0x1b,
 		.manufacturer = "Transcend/Samsung",
 	},
 	{
-		.type = "sd",
 		.id = 0x1c,
 		.manufacturer = "Transcend",
 	},
 	{
-		.type = "sd",
 		.id = 0x1d,
 		.manufacturer = "Corsair/AData",
 	},
 	{
-		.type = "sd",
 		.id = 0x1e,
 		.manufacturer = "Transcend",
 	},
 	{
-		.type = "sd",
 		.id = 0x1f,
 		.manufacturer = "Kingston",
 	},
 	{
-		.type = "sd",
 		.id = 0x27,
 		.manufacturer = "Delkin/Phison",
 	},
 	{
-		.type = "sd",
 		.id = 0x28,
 		.manufacturer = "Lexar",
 	},
 	{
-		.type = "sd",
 		.id = 0x30,
 		.manufacturer = "SanDisk",
 	},
 	{
-		.type = "sd",
 		.id = 0x31,
 		.manufacturer = "Silicon Power",
 	},
 	{
-		.type = "sd",
 		.id = 0x33,
 		.manufacturer = "STMicroelectronics",
 	},
 	{
-		.type = "sd",
 		.id = 0x41,
 		.manufacturer = "Kingston",
 	},
 	{
-		.type = "sd",
 		.id = 0x6f,
 		.manufacturer = "STMicroelectronics",
 	},
 	{
-		.type = "sd",
 		.id = 0x74,
 		.manufacturer = "Transcend",
 	},
 	{
-		.type = "sd",
 		.id = 0x76,
 		.manufacturer = "Patriot",
 	},
 	{
-		.type = "sd",
 		.id = 0x82,
 		.manufacturer = "Gobe/Sony",
 	},
 	{
-		.type = "sd",
 		.id = 0x89,
 		.manufacturer = "Unknown",
 	},
+};
+
+static struct ids_database mmc_database[] = {
 	{
-		.type = "mmc",
 		.id = 0x00,
 		.manufacturer = "SanDisk",
 	},
 	{
-		.type = "mmc",
 		.id = 0x02,
 		.manufacturer = "Kingston/SanDisk",
 	},
 	{
-		.type = "mmc",
 		.id = 0x03,
 		.manufacturer = "Toshiba",
 	},
 	{
-		.type = "mmc",
 		.id = 0x05,
 		.manufacturer = "Unknown",
 	},
 	{
-		.type = "mmc",
 		.id = 0x06,
 		.manufacturer = "Unknown",
 	},
 	{
-		.type = "mmc",
 		.id = 0x11,
 		.manufacturer = "Toshiba",
 	},
 	{
-		.type = "mmc",
 		.id = 0x13,
 		.manufacturer = "Micron",
 	},
 	{
-		.type = "mmc",
 		.id = 0x15,
 		.manufacturer = "Samsung/SanDisk/LG",
 	},
 	{
-		.type = "mmc",
 		.id = 0x37,
 		.manufacturer = "KingMax",
 	},
 	{
-		.type = "mmc",
 		.id = 0x44,
-		.manufacturer = "SanDisk",
+		.manufacturer = "ATP",
 	},
 	{
-		.type = "mmc",
+		.id = 0x45,
+		.manufacturer = "SanDisk Corporation",
+	},
+	{
 		.id = 0x2c,
 		.manufacturer = "Kingston",
 	},
 	{
-		.type = "mmc",
 		.id = 0x70,
 		.manufacturer = "Kingston",
 	},
 	{
-		.type = "mmc",
 		.id = 0xfe,
 		.manufacturer = "Micron",
 	},
 };
 
 /* Command line parsing functions */
-void usage(void)
+static void usage(void)
 {
 	printf("Usage: print mmc [-h] [-v] <device path ...>\n");
 	printf("\n");
@@ -266,7 +241,7 @@ void usage(void)
 	printf("\t-v\tEnable verbose mode.\n");
 }
 
-int parse_opts(int argc, char **argv, struct config *config)
+static int parse_opts(int argc, char **argv, struct config *config)
 {
 	int c;
 
@@ -305,51 +280,30 @@ int parse_opts(int argc, char **argv, struct config *config)
 	return 0;
 }
 
-int parse_ids(struct config *config)
+static char *get_manufacturer(struct config *config, unsigned int manid)
 {
-	unsigned int ids_cnt = sizeof(database) / sizeof(struct ids_database);
-	unsigned int value;
-	char **ids;
-	char *type;
+	struct ids_database *db;
+	unsigned int ids_cnt;
 	int i;
 
-	for (i = 0; i < ids_cnt; i++) {
-		type = database[i].type;
-
-		if (!strcmp(type, "mmc")) {
-			ids = config->mmc_ids;
-		} else if (!strcmp(type, "sd")) {
-			ids = config->sd_ids;
-		} else {
-			fprintf(stderr,
-				"MMC/SD id parse error, unknown type: '%s'.\n",
-				type);
-			return -1;
-		}
-
-		value = database[i].id;
-
-		if (value >= IDS_MAX) {
-			fprintf(stderr,
-				"MMC/SD id parse error, id out of range.\n");
-			return -1;
-		}
-
-		if (ids[value]) {
-			fprintf(stderr,
-				"Duplicate entries: type='%s', id='0x%1x'.\n",
-				type, value);
-			return -1;
-		}
-
-		ids[value] = database[i].manufacturer;
+	if (config->bus == MMC) {
+		db = mmc_database;
+		ids_cnt = ARRAY_SIZE(mmc_database);
+	} else {
+		db = sd_database;
+		ids_cnt = ARRAY_SIZE(sd_database);
 	}
 
-	return 0;
+	for (i = 0; i < ids_cnt; i++) {
+		if (db[i].id == manid)
+			return db[i].manufacturer;
+	}
+
+	return NULL;
 }
 
 /* MMC/SD file parsing functions */
-char *read_file(char *name)
+static char *read_file(char *name)
 {
 	char line[4096];
 	char *preparsed, *start = line;
@@ -399,7 +353,7 @@ char *read_file(char *name)
 }
 
 /* Hexadecimal string parsing functions */
-char *to_binstr(char *hexstr)
+static char *to_binstr(char *hexstr)
 {
 	char *bindigits[] = {
 		"0000", "0001", "0010", "0011", "0100", "0101", "0110", "0111",
@@ -433,7 +387,7 @@ char *to_binstr(char *hexstr)
 	return binstr;
 }
 
-void bin_to_unsigned(unsigned int *u, char *binstr, int width)
+static void bin_to_unsigned(unsigned int *u, char *binstr, int width)
 {
 	*u = 0;
 	assert(width <= 32);
@@ -447,7 +401,7 @@ void bin_to_unsigned(unsigned int *u, char *binstr, int width)
 	}
 }
 
-void bin_to_ascii(char *a, char *binstr, int width)
+static void bin_to_ascii(char *a, char *binstr, int width)
 {
 	assert(width % 8 == 0);
 	*a = '\0';
@@ -466,7 +420,7 @@ void bin_to_ascii(char *a, char *binstr, int width)
 	}
 }
 
-void parse_bin(char *hexstr, char *fmt, ...)
+static void parse_bin(char *hexstr, char *fmt, ...)
 {
 	va_list args;
 	char *origstr;
@@ -517,7 +471,7 @@ void parse_bin(char *hexstr, char *fmt, ...)
 }
 
 /* MMC/SD information parsing functions */
-void print_sd_cid(struct config *config, char *cid)
+static void print_sd_cid(struct config *config, char *cid)
 {
 	static const char *months[] = {
 		"jan", "feb", "mar", "apr", "may", "jun",
@@ -533,6 +487,7 @@ void print_sd_cid(struct config *config, char *cid)
 	unsigned int mdt_month;
 	unsigned int mdt_year;
 	unsigned int crc;
+	char *manufacturer = NULL;
 
 	parse_bin(cid, "8u16a40a4u4u32u4r8u4u7u1r",
 		&mid, &oid[0], &pnm[0], &prv_major, &prv_minor, &psn,
@@ -541,12 +496,14 @@ void print_sd_cid(struct config *config, char *cid)
 	oid[2] = '\0';
 	pnm[5] = '\0';
 
+	manufacturer = get_manufacturer(config, mid);
+
 	if (config->verbose) {
 		printf("======SD/CID======\n");
 
 		printf("\tMID: 0x%02x (", mid);
-		if (config->sd_ids[mid])
-			printf("%s)\n", config->sd_ids[mid]);
+		if (manufacturer)
+			printf("%s)\n", manufacturer);
 		else
 			printf("Unlisted)\n");
 
@@ -559,9 +516,9 @@ void print_sd_cid(struct config *config, char *cid)
 		       2000 + mdt_year, months[mdt_month]);
 		printf("\tCRC: 0x%02x\n", crc);
 	} else {
-		if (config->sd_ids[mid])
+		if (manufacturer)
 			printf("manufacturer: '%s' '%s'\n",
-			       config->sd_ids[mid], oid);
+			       manufacturer, oid);
 		else
 			printf("manufacturer: 'Unlisted' '%s'\n", oid);
 
@@ -572,7 +529,7 @@ void print_sd_cid(struct config *config, char *cid)
 	}
 }
 
-void print_mmc_cid(struct config *config, char *cid)
+static void print_mmc_cid(struct config *config, char *cid)
 {
 	static const char *months[] = {
 		"jan", "feb", "mar", "apr", "may", "jun",
@@ -589,6 +546,7 @@ void print_mmc_cid(struct config *config, char *cid)
 	unsigned int mdt_month;
 	unsigned int mdt_year;
 	unsigned int crc;
+	char *manufacturer = NULL;
 
 	parse_bin(cid, "8u6r2u8u48a4u4u32u4u4u7u1r",
 		&mid, &cbx, &oid, &pnm[0], &prv_major, &prv_minor, &psn,
@@ -596,12 +554,14 @@ void print_mmc_cid(struct config *config, char *cid)
 
 	pnm[6] = '\0';
 
+	manufacturer = get_manufacturer(config, mid);
+
 	if (config->verbose) {
 		printf("======MMC/CID======\n");
 
 		printf("\tMID: 0x%02x (", mid);
-		if (config->mmc_ids[mid])
-			printf("%s)\n", config->mmc_ids[mid]);
+		if (manufacturer)
+			printf("%s)\n", manufacturer);
 		else
 			printf("Unlisted)\n");
 
@@ -630,11 +590,11 @@ void print_mmc_cid(struct config *config, char *cid)
 		       1997 + mdt_year, months[mdt_month]);
 		printf("\tCRC: 0x%02x\n", crc);
 	} else {
-		if (config->mmc_ids[mid])
-			printf("manufacturer: '%s' '%c'\n",
-			       config->mmc_ids[mid], oid);
+		if (manufacturer)
+			printf("manufacturer: 0x%02x (%s) oid: 0x%01x\n",
+			       mid, manufacturer, oid);
 		else
-			printf("manufacturer: 'Unlisted' '%c'\n", oid);
+			printf("manufacturer: 0x%02x (Unlisted) oid: 0x%01x\n", mid, oid);
 
 		printf("product: '%s' %u.%u\n", pnm, prv_major, prv_minor);
 		printf("serial: 0x%08x\n", psn);
@@ -643,7 +603,7 @@ void print_mmc_cid(struct config *config, char *cid)
 	}
 }
 
-void print_sd_csd(struct config *config, char *csd)
+static void print_sd_csd(struct config *config, char *csd)
 {
 	unsigned int csd_structure;
 	unsigned int taac_timevalue;
@@ -1266,45 +1226,638 @@ void print_sd_csd(struct config *config, char *csd)
 	}
 }
 
-void print_mmc_csd(struct config *config, char *csd)
+static void print_mmc_csd_structure(unsigned int csd_structure)
 {
-	unsigned int csd_structure;
-	unsigned int spec_vers;
-	unsigned int taac_timevalue;
-	unsigned int taac_timeunit;
-	unsigned int nsac;
-	unsigned int tran_speed_timevalue;
-	unsigned int tran_speed_transferrateunit;
-	unsigned int ccc;
-	unsigned int read_bl_len;
-	unsigned int read_bl_partial;
-	unsigned int write_blk_misalign;
-	unsigned int read_blk_misalign;
-	unsigned int dsr_imp;
-	unsigned int c_size;
-	unsigned int vdd_r_curr_min;
-	unsigned int vdd_r_curr_max;
-	unsigned int vdd_w_curr_min;
-	unsigned int vdd_w_curr_max;
-	unsigned int c_size_mult;
-	unsigned int erase_grp_size;
-	unsigned int erase_grp_mult;
-	unsigned int wp_grp_size;
-	unsigned int wp_grp_enable;
-	unsigned int default_ecc;
-	unsigned int r2w_factor;
-	unsigned int write_bl_len;
-	unsigned int write_bl_partial;
-	unsigned int content_prot_app;
-	unsigned int file_format_grp;
-	unsigned int copy;
-	unsigned int perm_write_protect;
-	unsigned int tmp_write_protect;
-	unsigned int file_format;
-	unsigned int ecc;
-	unsigned int crc;
-	unsigned int taac;
-	unsigned int tran_speed;
+	printf("\tCSD_STRUCTURE: 0x%01x (", csd_structure);
+	switch (csd_structure) {
+	case 0x0:
+		printf("v1.0)\n");
+		break;
+	case 0x1:
+		printf("v1.1)\n");
+		break;
+	case 0x2:
+		printf("v1.2)\n");
+		break;
+	case 0x3:
+		printf("version in ext_csd)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_spec_ver(unsigned int spec_vers)
+{
+	printf("\tSPEC_VERS: 0x%01x (", spec_vers);
+	switch (spec_vers) {
+	case 0x0:
+		printf("v1.0-v1.2)\n");
+		break;
+	case 0x1:
+		printf("v1.4)\n");
+		break;
+	case 0x2:
+		printf("v2.0-v2.2)\n");
+		break;
+	case 0x3:
+		printf("v3.1-v3.31)\n");
+		break;
+	case 0x4:
+		printf("v4.0-v4.3)\n");
+		break;
+	default:
+		printf("reserved)\n");
+		break;
+	}
+}
+
+static void
+print_mmc_csd_taac(unsigned int taac_timevalue, unsigned int taac_timeunit)
+{
+	float value;
+	unsigned int taac = taac_timevalue << 3 | taac_timeunit;
+
+	printf("\tTAAC: 0x%02x (", taac);
+	switch (taac_timevalue) {
+	case 0x0:
+		value = 0.0f;
+		break;
+	case 0x1:
+		value = 1.0f;
+		break;
+	case 0x2:
+		value = 1.2f;
+		break;
+	case 0x3:
+		value = 1.3f;
+		break;
+	case 0x4:
+		value = 1.5f;
+		break;
+	case 0x5:
+		value = 2.0f;
+		break;
+	case 0x6:
+		value = 2.5f;
+		break;
+	case 0x7:
+		value = 3.0f;
+		break;
+	case 0x8:
+		value = 3.5f;
+		break;
+	case 0x9:
+		value = 4.0f;
+		break;
+	case 0xa:
+		value = 4.5f;
+		break;
+	case 0xb:
+		value = 5.0f;
+		break;
+	case 0xc:
+		value = 5.5f;
+		break;
+	case 0xd:
+		value = 6.0f;
+		break;
+	case 0xe:
+		value = 7.0f;
+		break;
+	case 0xf:
+		value = 8.0f;
+		break;
+	default:
+		value = 0.0f;
+		break;
+	}
+
+	switch (taac_timeunit) {
+	case 0x0:
+		printf("%.2fns)\n", value * 1.0f);
+		break;
+	case 0x1:
+		printf("%.2fns)\n", value * 10.0f);
+		break;
+	case 0x2:
+		printf("%.2fns)\n", value * 100.0f);
+		break;
+	case 0x3:
+		printf("%.2fus)\n", value * 1.0f);
+		break;
+	case 0x4:
+		printf("%.2fus)\n", value * 10.0f);
+		break;
+	case 0x5:
+		printf("%.2fus)\n", value * 100.0f);
+		break;
+	case 0x6:
+		printf("%.2fms)\n", value * 1.0f);
+		break;
+	case 0x7:
+		printf("%.2fms)\n", value * 10.0f);
+		break;
+	}
+}
+
+static void print_mmc_csd_nsac(unsigned int nsac, unsigned int tran_speed_timevalue,
+			       unsigned int tran_speed_transferrateunit)
+{
+	float value;
+	unsigned int tran_speed = tran_speed_timevalue << 3 | tran_speed_transferrateunit;
+
+	printf("\tNSAC: %u clocks\n", nsac);
+	printf("\tTRAN_SPEED: 0x%02x (", tran_speed);
+	switch (tran_speed_timevalue) {
+	case 0x0:
+		value = 0.0f;
+		break;
+	case 0x1:
+		value = 1.0f;
+		break;
+	case 0x2:
+		value = 1.2f;
+		break;
+	case 0x3:
+		value = 1.3f;
+		break;
+	case 0x4:
+		value = 1.5f;
+		break;
+	case 0x5:
+		value = 2.0f;
+		break;
+	case 0x6:
+		value = 2.6f;
+		break;
+	case 0x7:
+		value = 3.0f;
+		break;
+	case 0x8:
+		value = 3.5f;
+		break;
+	case 0x9:
+		value = 4.0f;
+		break;
+	case 0xa:
+		value = 4.5f;
+		break;
+	case 0xb:
+		value = 5.2f;
+		break;
+	case 0xc:
+		value = 5.5f;
+		break;
+	case 0xd:
+		value = 6.0f;
+		break;
+	case 0xe:
+		value = 7.0f;
+		break;
+	case 0xf:
+		value = 8.0f;
+		break;
+	default:
+		value = 0.0f;
+		break;
+	}
+
+	switch (tran_speed_transferrateunit) {
+	case 0x0:
+		printf("%.2fKHz/s)\n", value * 100.0f);
+		break;
+	case 0x1:
+		printf("%.2fMHz/s)\n", value * 1.0f);
+		break;
+	case 0x2:
+		printf("%.2fMHz/s)\n", value * 10.0f);
+		break;
+	case 0x3:
+		printf("%.2fMHz/s)\n", value * 100.0f);
+		break;
+	default:
+		printf("reserved)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_ccc(unsigned int ccc)
+{
+	printf("\tCCC: 0x%03x (class: ", ccc);
+	if (ccc & 0x800)
+		printf("11, ");
+	if (ccc & 0x400)
+		printf("10, ");
+	if (ccc & 0x200)
+		printf("9, ");
+	if (ccc & 0x100)
+		printf("8, ");
+	if (ccc & 0x080)
+		printf("7, ");
+	if (ccc & 0x040)
+		printf("6, ");
+	if (ccc & 0x020)
+		printf("5, ");
+	if (ccc & 0x010)
+		printf("4, ");
+	if (ccc & 0x008)
+		printf("3, ");
+	if (ccc & 0x004)
+		printf("2, ");
+	if (ccc & 0x002)
+		printf("1, ");
+	if (ccc & 0x001)
+		printf("0, ");
+	printf("  )\n");
+}
+
+static void print_mmc_csd_read_bl_len(unsigned int read_bl_len)
+{
+	printf("\tREAD_BL_LEN: 0x%01x (", read_bl_len);
+	switch (read_bl_len) {
+	case 0x0:
+		printf("1 byte)\n");
+		break;
+	case 0x1:
+		printf("2 byte)\n");
+		break;
+	case 0x2:
+		printf("4 byte)\n");
+		break;
+	case 0x3:
+		printf("8 byte)\n");
+		break;
+	case 0x4:
+		printf("16 byte)\n");
+		break;
+	case 0x5:
+		printf("32 byte)\n");
+		break;
+	case 0x6:
+		printf("64 byte)\n");
+		break;
+	case 0x7:
+		printf("128 byte)\n");
+		break;
+	case 0x8:
+		printf("256 byte)\n");
+		break;
+	case 0x9:
+		printf("512 bytes)\n");
+		break;
+	case 0xa:
+		printf("1024 bytes)\n");
+		break;
+	case 0xb:
+		printf("2048 bytes)\n");
+		break;
+	case 0xc:
+		printf("4096 bytes)\n");
+		break;
+	case 0xd:
+		printf("8192 bytes)\n");
+		break;
+	case 0xe:
+		printf("16K bytes)\n");
+		break;
+	default:
+		printf("reserved bytes)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_read_bl_partial(unsigned int read_bl_partial)
+{
+	printf("\tREAD_BL_PARTIAL: 0x%01x (", read_bl_partial);
+	switch (read_bl_partial) {
+	case 0x0:
+		printf("only 512 byte and READ_BL_LEN block size)\n");
+		break;
+	case 0x1:
+		printf("less than READ_BL_LEN block size can be used)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_write_blk_misalign(unsigned int write_blk_misalign)
+{
+	printf("\tWRITE_BLK_MISALIGN: 0x%01x (", write_blk_misalign);
+	switch (write_blk_misalign) {
+	case 0x0:
+		printf("writes across block boundaries are invalid)\n");
+		break;
+	case 0x1:
+		printf("writes across block boundaries are allowed)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_read_blk_misalign(unsigned int read_blk_misalign)
+{
+	printf("\tREAD_BLK_MISALIGN: 0x%01x (", read_blk_misalign);
+	switch (read_blk_misalign) {
+	case 0x0:
+		printf("reads across block boundaries are invalid)\n");
+		break;
+	case 0x1:
+		printf("reads across block boundaries are allowed)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_dsr_imp(unsigned int dsr_imp)
+{
+	printf("\tDSR_IMP: 0x%01x (", dsr_imp);
+	switch (dsr_imp) {
+	case 0x0:
+		printf("configurable driver stage not available)\n");
+		break;
+	case 0x1:
+		printf("configurable driver state available)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_vdd(unsigned int vdd_r_curr_min, unsigned int vdd_r_curr_max,
+			      unsigned int vdd_w_curr_min, unsigned int vdd_w_curr_max)
+{
+	printf("\tVDD_R_CURR_MIN: 0x%01x (", vdd_r_curr_min);
+	switch (vdd_r_curr_min) {
+	case 0x0:
+		printf("0.5mA)\n");
+		break;
+	case 0x1:
+		printf("1mA)\n");
+		break;
+	case 0x2:
+		printf("5mA)\n");
+		break;
+	case 0x3:
+		printf("10mA)\n");
+		break;
+	case 0x4:
+		printf("25mA)\n");
+		break;
+	case 0x5:
+		printf("35mA)\n");
+		break;
+	case 0x6:
+		printf("60mA)\n");
+		break;
+	case 0x7:
+		printf("100mA)\n");
+		break;
+	}
+
+	printf("\tVDD_R_CURR_MAX: 0x%01x (", vdd_r_curr_max);
+	switch (vdd_r_curr_max) {
+	case 0x0:
+		printf("1mA)\n");
+		break;
+	case 0x1:
+		printf("5mA)\n");
+		break;
+	case 0x2:
+		printf("10mA)\n");
+		break;
+	case 0x3:
+		printf("25mA)\n");
+		break;
+	case 0x4:
+		printf("35mA)\n");
+		break;
+	case 0x5:
+		printf("45mA)\n");
+		break;
+	case 0x6:
+		printf("80mA)\n");
+		break;
+	case 0x7:
+		printf("200mA)\n");
+		break;
+	}
+
+	printf("\tVDD_W_CURR_MIN: 0x%01x (", vdd_w_curr_min);
+	switch (vdd_w_curr_min) {
+	case 0x0:
+		printf("0.5mA)\n");
+		break;
+	case 0x1:
+		printf("1mA)\n");
+		break;
+	case 0x2:
+		printf("5mA)\n");
+		break;
+	case 0x3:
+		printf("10mA)\n");
+		break;
+	case 0x4:
+		printf("25mA)\n");
+		break;
+	case 0x5:
+		printf("35mA)\n");
+		break;
+	case 0x6:
+		printf("60mA)\n");
+		break;
+	case 0x7:
+		printf("100mA)\n");
+		break;
+	}
+
+	printf("\tVDD_W_CURR_MAX: 0x%01x (", vdd_w_curr_max);
+	switch (vdd_w_curr_max) {
+	case 0x0:
+		printf("1mA)\n");
+		break;
+	case 0x1:
+		printf("5mA)\n");
+		break;
+	case 0x2:
+		printf("10mA)\n");
+		break;
+	case 0x3:
+		printf("25mA)\n");
+		break;
+	case 0x4:
+		printf("35mA)\n");
+		break;
+	case 0x5:
+		printf("45mA)\n");
+		break;
+	case 0x6:
+		printf("80mA)\n");
+		break;
+	case 0x7:
+		printf("200mA)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_default_ecc(unsigned int default_ecc)
+{
+	printf("\tDEFAULT_ECC: 0x%01x (", default_ecc);
+	switch (default_ecc) {
+	case 0:
+		printf("none)\n");
+		break;
+	case 1:
+		printf("BCH)\n");
+		break;
+	default:
+		printf("reserved)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_write_bl_len(unsigned int write_bl_len)
+{
+	printf("\tWRITE_BL_LEN: 0x%01x (", write_bl_len);
+	switch (write_bl_len) {
+	case 0x0:
+		printf("1 byte)\n");
+		break;
+	case 0x1:
+		printf("2 byte)\n");
+		break;
+	case 0x2:
+		printf("4 byte)\n");
+		break;
+	case 0x3:
+		printf("8 byte)\n");
+		break;
+	case 0x4:
+		printf("16 byte)\n");
+		break;
+	case 0x5:
+		printf("32 byte)\n");
+		break;
+	case 0x6:
+		printf("64 byte)\n");
+		break;
+	case 0x7:
+		printf("128 byte)\n");
+		break;
+	case 0x8:
+		printf("256 byte)\n");
+		break;
+	case 0x9:
+		printf("512 bytes)\n");
+		break;
+	case 0xa:
+		printf("1024 bytes)\n");
+		break;
+	case 0xb:
+		printf("2048 bytes)\n");
+		break;
+	case 0xc:
+		printf("4096 bytes)\n");
+		break;
+	case 0xd:
+		printf("8192 bytes)\n");
+		break;
+	case 0xe:
+		printf("16K bytes)\n");
+		break;
+	default:
+		printf("reserved bytes)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_write_bl_partial(unsigned int write_bl_partial)
+{
+	printf("\tWRITE_BL_PARTIAL: 0x%01x (", write_bl_partial);
+	switch (write_bl_partial) {
+	case 0x0:
+		printf("only 512 byte and WRITE_BL_LEN block size)\n");
+		break;
+	case 0x1:
+		printf("less than WRITE_BL_LEN block size can be used)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_file_format(unsigned int file_format, unsigned int file_format_grp)
+{
+	printf("\tFILE_FORMAT: 0x%01x (", file_format);
+	if (file_format != 0)
+		printf("Warn: Invalid FILE_FORMAT\n");
+
+	if (file_format_grp == 1) {
+		printf("reserved)\n");
+	} else {
+		switch (file_format) {
+		case 0:
+			printf("partition table)\n");
+			break;
+		case 1:
+			printf("no partition table)\n");
+			break;
+		case 2:
+			printf("Universal File Format)\n");
+			break;
+		case 3:
+			printf("Others/unknown)\n");
+			break;
+		}
+	}
+}
+
+static void print_mmc_csd_ecc(unsigned int ecc)
+{
+	printf("\tECC: 0x%01x (", ecc);
+	switch (ecc) {
+	case 0:
+		printf("none)\n");
+		break;
+	case 1:
+		printf("BCH(542,512))\n");
+		break;
+	default:
+		printf("reserved)\n");
+		break;
+	}
+}
+
+static void print_mmc_csd_capacity(unsigned int c_size, unsigned int c_size_mult,
+				   unsigned int read_bl_len)
+{
+	int mult = 1 << (c_size_mult + 2);
+	unsigned long long blocknr = (c_size + 1) * mult;
+	int block_len = 1 << read_bl_len;
+	unsigned long long memory_capacity;
+
+	if (c_size == 0xfff)
+		return;
+
+	printf("\tC_SIZE: 0x%03x\n", c_size);
+	printf("\tC_SIZE_MULT: 0x%01x\n", c_size_mult);
+
+	memory_capacity = blocknr * block_len;
+
+	printf("\tCAPACITY: ");
+	if (memory_capacity / (1024ull * 1024ull * 1024ull) > 0)
+		printf("%.2fGbyte", memory_capacity / (1024.0 * 1024.0 * 1024.0));
+	else if (memory_capacity / (1024ull * 1024ull) > 0)
+		printf("%.2fMbyte", memory_capacity / (1024.0 * 1024.0));
+	else if (memory_capacity / (1024ull) > 0)
+		printf("%.2fKbyte", memory_capacity / (1024.0));
+	else
+		printf("%.2fbyte", memory_capacity * 1.0);
+
+	printf(" (%llu bytes, %llu sectors, %d bytes each)\n", memory_capacity, blocknr, block_len);
+}
+
+static void print_mmc_csd(struct config *config, char *csd)
+{
+	unsigned int csd_structure, spec_vers, taac_timevalue, taac_timeunit, nsac;
+	unsigned int tran_speed_timevalue, tran_speed_transferrateunit, ccc, read_bl_len;
+	unsigned int read_bl_partial, write_blk_misalign, read_blk_misalign, dsr_imp;
+	unsigned int c_size, vdd_r_curr_min, vdd_r_curr_max, vdd_w_curr_min, vdd_w_curr_max;
+	unsigned int c_size_mult, erase_grp_size, erase_grp_mult, wp_grp_size, wp_grp_enable;
+	unsigned int default_ecc, r2w_factor, write_bl_len, write_bl_partial, content_prot_app;
+	unsigned int file_format_grp, copy, perm_write_protect, tmp_write_protect, file_format;
+	unsigned int ecc, crc;
 
 	parse_bin(csd, "2u4u2r1r4u3u8u1r4u3u12u4u1u1u1u1u2r12u3u3u3u3u3u"
 		  "5u5u5u1u2u3u4u1u4r1u1u1u1u1u2u2u7u1r",
@@ -1321,447 +1874,32 @@ void print_mmc_csd(struct config *config, char *csd)
 		  &file_format_grp, &copy, &perm_write_protect,
 		  &tmp_write_protect, &file_format, &ecc, &crc);
 
-	taac = taac_timevalue << 3 | taac_timeunit;
-	tran_speed = tran_speed_timevalue << 3 | tran_speed_transferrateunit;
-
 	if (config->verbose) {
-		float value;
-		int mult;
-		int blocknr;
-		int block_len;
-		unsigned long long blocks = 0;
-		int block_size = 0;
-		unsigned long long memory_capacity;
 
 		printf("======MMC/CSD======\n");
 
-		printf("\tCSD_STRUCTURE: 0x%01x (", csd_structure);
-		switch (csd_structure) {
-		case 0x0:
-			printf("v1.0)\n");
-			break;
-		case 0x1:
-			printf("v1.1)\n");
-			break;
-		case 0x2:
-			printf("v1.2)\n");
-			break;
-		case 0x3:
-			printf("version in ext_csd)\n");
-			break;
-		}
+		print_mmc_csd_structure(csd_structure);
 
-		printf("\tSPEC_VERS: 0x%01x (", spec_vers);
-		switch (spec_vers) {
-		case 0x0:
-			printf("v1.0-v1.2)\n");
-			break;
-		case 0x1:
-			printf("v1.4)\n");
-			break;
-		case 0x2:
-			printf("v2.0-v2.2)\n");
-			break;
-		case 0x3:
-			printf("v3.1-v3.31)\n");
-			break;
-		case 0x4:
-			printf("v4.0-v4.3)\n");
-			break;
-		default:
-			printf("reserved)\n");
-			break;
-		}
+		print_mmc_csd_spec_ver(spec_vers);
 
-		printf("\tTAAC: 0x%02x (", taac);
-		switch (taac_timevalue) {
-		case 0x0:
-			value = 0.0f;
-			break;
-		case 0x1:
-			value = 1.0f;
-			break;
-		case 0x2:
-			value = 1.2f;
-			break;
-		case 0x3:
-			value = 1.3f;
-			break;
-		case 0x4:
-			value = 1.5f;
-			break;
-		case 0x5:
-			value = 2.0f;
-			break;
-		case 0x6:
-			value = 2.5f;
-			break;
-		case 0x7:
-			value = 3.0f;
-			break;
-		case 0x8:
-			value = 3.5f;
-			break;
-		case 0x9:
-			value = 4.0f;
-			break;
-		case 0xa:
-			value = 4.5f;
-			break;
-		case 0xb:
-			value = 5.0f;
-			break;
-		case 0xc:
-			value = 5.5f;
-			break;
-		case 0xd:
-			value = 6.0f;
-			break;
-		case 0xe:
-			value = 7.0f;
-			break;
-		case 0xf:
-			value = 8.0f;
-			break;
-		default:
-			value = 0.0f;
-			break;
-		}
+		print_mmc_csd_taac(taac_timevalue, taac_timeunit);
 
-		switch (taac_timeunit) {
-		case 0x0:
-			printf("%.2fns)\n", value * 1.0f);
-			break;
-		case 0x1:
-			printf("%.2fns)\n", value * 10.0f);
-			break;
-		case 0x2:
-			printf("%.2fns)\n", value * 100.0f);
-			break;
-		case 0x3:
-			printf("%.2fus)\n", value * 1.0f);
-			break;
-		case 0x4:
-			printf("%.2fus)\n", value * 10.0f);
-			break;
-		case 0x5:
-			printf("%.2fus)\n", value * 100.0f);
-			break;
-		case 0x6:
-			printf("%.2fms)\n", value * 1.0f);
-			break;
-		case 0x7:
-			printf("%.2fms)\n", value * 10.0f);
-			break;
-		}
+		print_mmc_csd_nsac(nsac, tran_speed_timevalue, tran_speed_transferrateunit);
 
-		printf("\tNSAC: %u clocks\n", nsac);
-		printf("\tTRAN_SPEED: 0x%02x (", tran_speed);
-		switch (tran_speed_timevalue) {
-		case 0x0:
-			value = 0.0f;
-			break;
-		case 0x1:
-			value = 1.0f;
-			break;
-		case 0x2:
-			value = 1.2f;
-			break;
-		case 0x3:
-			value = 1.3f;
-			break;
-		case 0x4:
-			value = 1.5f;
-			break;
-		case 0x5:
-			value = 2.0f;
-			break;
-		case 0x6:
-			value = 2.6f;
-			break;
-		case 0x7:
-			value = 3.0f;
-			break;
-		case 0x8:
-			value = 3.5f;
-			break;
-		case 0x9:
-			value = 4.0f;
-			break;
-		case 0xa:
-			value = 4.5f;
-			break;
-		case 0xb:
-			value = 5.2f;
-			break;
-		case 0xc:
-			value = 5.5f;
-			break;
-		case 0xd:
-			value = 6.0f;
-			break;
-		case 0xe:
-			value = 7.0f;
-			break;
-		case 0xf:
-			value = 8.0f;
-			break;
-		default:
-			value = 0.0f;
-			break;
-		}
+		print_mmc_csd_ccc(ccc);
 
-		switch (tran_speed_transferrateunit) {
-		case 0x0:
-			printf("%.2fKHz/s)\n", value * 100.0f);
-			break;
-		case 0x1:
-			printf("%.2fMHz/s)\n", value * 1.0f);
-			break;
-		case 0x2:
-			printf("%.2fMHz/s)\n", value * 10.0f);
-			break;
-		case 0x3:
-			printf("%.2fMHz/s)\n", value * 100.0f);
-			break;
-		default:
-			printf("reserved)\n");
-			break;
-		}
+		print_mmc_csd_read_bl_len(read_bl_len);
 
-		printf("\tCCC: 0x%03x (class: ", ccc);
-		if (ccc & 0x800)
-			printf("11, ");
-		if (ccc & 0x400)
-			printf("10, ");
-		if (ccc & 0x200)
-			printf("9, ");
-		if (ccc & 0x100)
-			printf("8, ");
-		if (ccc & 0x080)
-			printf("7, ");
-		if (ccc & 0x040)
-			printf("6, ");
-		if (ccc & 0x020)
-			printf("5, ");
-		if (ccc & 0x010)
-			printf("4, ");
-		if (ccc & 0x008)
-			printf("3, ");
-		if (ccc & 0x004)
-			printf("2, ");
-		if (ccc & 0x002)
-			printf("1, ");
-		if (ccc & 0x001)
-			printf("0, ");
-		printf("  )\n");
+		print_mmc_csd_read_bl_partial(read_bl_partial);
 
-		printf("\tREAD_BL_LEN: 0x%01x (", read_bl_len);
-		switch (read_bl_len) {
-		case 0x0:
-			printf("1 byte)\n");
-			break;
-		case 0x1:
-			printf("2 byte)\n");
-			break;
-		case 0x2:
-			printf("4 byte)\n");
-			break;
-		case 0x3:
-			printf("8 byte)\n");
-			break;
-		case 0x4:
-			printf("16 byte)\n");
-			break;
-		case 0x5:
-			printf("32 byte)\n");
-			break;
-		case 0x6:
-			printf("64 byte)\n");
-			break;
-		case 0x7:
-			printf("128 byte)\n");
-			break;
-		case 0x8:
-			printf("256 byte)\n");
-			break;
-		case 0x9:
-			printf("512 bytes)\n");
-			break;
-		case 0xa:
-			printf("1024 bytes)\n");
-			break;
-		case 0xb:
-			printf("2048 bytes)\n");
-			break;
-		case 0xc:
-			printf("4096 bytes)\n");
-			break;
-		case 0xd:
-			printf("8192 bytes)\n");
-			break;
-		case 0xe:
-			printf("16K bytes)\n");
-			break;
-		default:
-			printf("reserved bytes)\n");
-			break;
-		}
+		print_mmc_csd_write_blk_misalign(write_blk_misalign);
 
-		printf("\tREAD_BL_PARTIAL: 0x%01x (", read_bl_partial);
-		switch (read_bl_partial) {
-		case 0x0:
-			printf("only 512 byte and READ_BL_LEN block size)\n");
-			break;
-		case 0x1:
-			printf("less than READ_BL_LEN block size can be used)\n");
-			break;
-		}
+		print_mmc_csd_read_blk_misalign(read_blk_misalign);
 
-		printf("\tWRITE_BLK_MISALIGN: 0x%01x (", write_blk_misalign);
-		switch (write_blk_misalign) {
-		case 0x0:
-			printf("writes across block boundaries are invalid)\n");
-			break;
-		case 0x1:
-			printf("writes across block boundaries are allowed)\n");
-			break;
-		}
+		print_mmc_csd_dsr_imp(dsr_imp);
 
-		printf("\tREAD_BLK_MISALIGN: 0x%01x (", read_blk_misalign);
-		switch (read_blk_misalign) {
-		case 0x0:
-			printf("reads across block boundaries are invalid)\n");
-			break;
-		case 0x1:
-			printf("reads across block boundaries are allowed)\n");
-			break;
-		}
+		print_mmc_csd_vdd(vdd_r_curr_min, vdd_r_curr_max, vdd_w_curr_min, vdd_w_curr_max);
 
-		printf("\tDSR_IMP: 0x%01x (", dsr_imp);
-		switch (dsr_imp) {
-		case 0x0:
-			printf("configurable driver stage not available)\n");
-			break;
-		case 0x1:
-			printf("configurable driver state available)\n");
-			break;
-		}
-
-		printf("\tC_SIZE: 0x%03x\n", c_size);
-		printf("\tVDD_R_CURR_MIN: 0x%01x (", vdd_r_curr_min);
-		switch (vdd_r_curr_min) {
-		case 0x0:
-			printf("0.5mA)\n");
-			break;
-		case 0x1:
-			printf("1mA)\n");
-			break;
-		case 0x2:
-			printf("5mA)\n");
-			break;
-		case 0x3:
-			printf("10mA)\n");
-			break;
-		case 0x4:
-			printf("25mA)\n");
-			break;
-		case 0x5:
-			printf("35mA)\n");
-			break;
-		case 0x6:
-			printf("60mA)\n");
-			break;
-		case 0x7:
-			printf("100mA)\n");
-			break;
-		}
-
-		printf("\tVDD_R_CURR_MAX: 0x%01x (", vdd_r_curr_max);
-		switch (vdd_r_curr_max) {
-		case 0x0:
-			printf("1mA)\n");
-			break;
-		case 0x1:
-			printf("5mA)\n");
-			break;
-		case 0x2:
-			printf("10mA)\n");
-			break;
-		case 0x3:
-			printf("25mA)\n");
-			break;
-		case 0x4:
-			printf("35mA)\n");
-			break;
-		case 0x5:
-			printf("45mA)\n");
-			break;
-		case 0x6:
-			printf("80mA)\n");
-			break;
-		case 0x7:
-			printf("200mA)\n");
-			break;
-		}
-
-		printf("\tVDD_W_CURR_MIN: 0x%01x (", vdd_w_curr_min);
-		switch (vdd_w_curr_min) {
-		case 0x0:
-			printf("0.5mA)\n");
-			break;
-		case 0x1:
-			printf("1mA)\n");
-			break;
-		case 0x2:
-			printf("5mA)\n");
-			break;
-		case 0x3:
-			printf("10mA)\n");
-			break;
-		case 0x4:
-			printf("25mA)\n");
-			break;
-		case 0x5:
-			printf("35mA)\n");
-			break;
-		case 0x6:
-			printf("60mA)\n");
-			break;
-		case 0x7:
-			printf("100mA)\n");
-			break;
-		}
-
-		printf("\tVDD_W_CURR_MAX: 0x%01x (", vdd_w_curr_max);
-		switch (vdd_w_curr_max) {
-		case 0x0:
-			printf("1mA)\n");
-			break;
-		case 0x1:
-			printf("5mA)\n");
-			break;
-		case 0x2:
-			printf("10mA)\n");
-			break;
-		case 0x3:
-			printf("25mA)\n");
-			break;
-		case 0x4:
-			printf("35mA)\n");
-			break;
-		case 0x5:
-			printf("45mA)\n");
-			break;
-		case 0x6:
-			printf("80mA)\n");
-			break;
-		case 0x7:
-			printf("200mA)\n");
-			break;
-		}
-
-		printf("\tC_SIZE_MULT: 0x%01x\n", c_size_mult);
 		printf("\tERASE_GRP_SIZE: 0x%02x\n", erase_grp_size);
 		printf("\tERASE_GRP_MULT: 0x%02x (%u write blocks/erase group)\n",
 		       erase_grp_mult, (erase_grp_size + 1) *
@@ -1770,83 +1908,14 @@ void print_mmc_csd(struct config *config, char *csd)
 		       wp_grp_size, wp_grp_size + 1);
 		printf("\tWP_GRP_ENABLE: 0x%01x\n", wp_grp_enable);
 
-		printf("\tDEFAULT_ECC: 0x%01x (", default_ecc);
-		switch (default_ecc) {
-		case 0:
-			printf("none)\n");
-			break;
-		case 1:
-			printf("BCH)\n");
-			break;
-		default:
-			printf("reserved)\n");
-			break;
-		}
+		print_mmc_csd_default_ecc(default_ecc);
 
 		printf("\tR2W_FACTOR: 0x%01x (Write %u times read)\n",
 		       r2w_factor, r2w_factor);
 
-		printf("\tWRITE_BL_LEN: 0x%01x (", write_bl_len);
-		switch (write_bl_len) {
-		case 0x0:
-			printf("1 byte)\n");
-			break;
-		case 0x1:
-			printf("2 byte)\n");
-			break;
-		case 0x2:
-			printf("4 byte)\n");
-			break;
-		case 0x3:
-			printf("8 byte)\n");
-			break;
-		case 0x4:
-			printf("16 byte)\n");
-			break;
-		case 0x5:
-			printf("32 byte)\n");
-			break;
-		case 0x6:
-			printf("64 byte)\n");
-			break;
-		case 0x7:
-			printf("128 byte)\n");
-			break;
-		case 0x8:
-			printf("256 byte)\n");
-			break;
-		case 0x9:
-			printf("512 bytes)\n");
-			break;
-		case 0xa:
-			printf("1024 bytes)\n");
-			break;
-		case 0xb:
-			printf("2048 bytes)\n");
-			break;
-		case 0xc:
-			printf("4096 bytes)\n");
-			break;
-		case 0xd:
-			printf("8192 bytes)\n");
-			break;
-		case 0xe:
-			printf("16K bytes)\n");
-			break;
-		default:
-			printf("reserved bytes)\n");
-			break;
-		}
+		print_mmc_csd_write_bl_len(write_bl_len);
 
-		printf("\tWRITE_BL_PARTIAL: 0x%01x (", write_bl_partial);
-		switch (write_bl_partial) {
-		case 0x0:
-			printf("only 512 byte and WRITE_BL_LEN block size)\n");
-			break;
-		case 0x1:
-			printf("less than WRITE_BL_LEN block size can be used)\n");
-			break;
-		}
+		print_mmc_csd_write_bl_partial(write_bl_partial);
 
 		printf("\tCONTENT_PROT_APP: 0x%01x\n", content_prot_app);
 		printf("\tFILE_FORMAT_GRP: 0x%01x\n", file_format_grp);
@@ -1856,267 +1925,24 @@ void print_mmc_csd(struct config *config, char *csd)
 		printf("\tCOPY: 0x%01x\n", copy);
 		printf("\tPERM_WRITE_PROTECT: 0x%01x\n", perm_write_protect);
 		printf("\tTMP_WRITE_PROTECT: 0x%01x\n", tmp_write_protect);
-		printf("\tFILE_FORMAT: 0x%01x (", file_format);
-		if (file_format != 0)
-			printf("Warn: Invalid FILE_FORMAT\n");
 
-		if (file_format_grp == 1) {
-			printf("reserved)\n");
-		} else {
-			switch (file_format) {
-			case 0:
-				printf("partition table)\n");
-				break;
-			case 1:
-				printf("no partition table)\n");
-				break;
-			case 2:
-				printf("Universal File Format)\n");
-				break;
-			case 3:
-				printf("Others/unknown)\n");
-				break;
-			}
-		}
+		print_mmc_csd_file_format(file_format, file_format_grp);
 
-		printf("\tECC: 0x%01x (", ecc);
-		switch (ecc) {
-		case 0:
-			printf("none)\n");
-			break;
-		case 1:
-			printf("BCH(542,512))\n");
-			break;
-		default:
-			printf("reserved)\n");
-			break;
-		}
+		print_mmc_csd_ecc(ecc);
 
 		printf("\tCRC: 0x%01x\n", crc);
 
-		mult = 1 << (c_size_mult + 2);
-		blocknr = (c_size + 1) * mult;
-		block_len = 1 << read_bl_len;
-		blocks = blocknr;
-		block_size = block_len;
-
-		memory_capacity = blocks * block_size;
-
-		printf("\tCAPACITY: ");
-		if (memory_capacity / (1024ull * 1024ull * 1024ull) > 0)
-			printf("%.2fGbyte",
-			       memory_capacity / (1024.0 * 1024.0 * 1024.0));
-		else if (memory_capacity / (1024ull * 1024ull) > 0)
-			printf("%.2fMbyte", memory_capacity / (1024.0 * 1024.0));
-		else if (memory_capacity / (1024ull) > 0)
-			printf("%.2fKbyte", memory_capacity / (1024.0));
-		else
-			printf("%.2fbyte", memory_capacity * 1.0);
-
-		printf(" (%llu bytes, %llu sectors, %d bytes each)\n",
-		       memory_capacity, blocks, block_size);
+		print_mmc_csd_capacity(c_size, c_size_mult, read_bl_len);
 	} else {
-		int mult;
-		int blocknr;
-		int block_len;
-		unsigned long long blocks = 0;
-		int block_size = 0;
-		unsigned long long memory_capacity;
+		print_mmc_csd_spec_ver(spec_vers);
 
-		printf("version: ");
-		switch (spec_vers) {
-		case 0x0:
-			printf("MMC v1.0-v1.2\n");
-			break;
-		case 0x1:
-			printf("MMC v1.4\n");
-			break;
-		case 0x2:
-			printf("MMC v2.0-v2.2\n");
-			break;
-		case 0x3:
-			printf("MMC v3.1-v3.31\n");
-			break;
-		case 0x4:
-			printf("MMC v4.0-v4.3\n");
-			break;
-		default:
-			printf("reserved\n");
-			break;
-		}
+		print_mmc_csd_ccc(ccc);
 
-		printf("card classes: ");
-		if (ccc & 0x800)
-			printf("11, ");
-		if (ccc & 0x400)
-			printf("10, ");
-		if (ccc & 0x200)
-			printf("9, ");
-		if (ccc & 0x100)
-			printf("8, ");
-		if (ccc & 0x080)
-			printf("7, ");
-		if (ccc & 0x040)
-			printf("6, ");
-		if (ccc & 0x020)
-			printf("5, ");
-		if (ccc & 0x010)
-			printf("4, ");
-		if (ccc & 0x008)
-			printf("3, ");
-		if (ccc & 0x004)
-			printf("2, ");
-		if (ccc & 0x002)
-			printf("1, ");
-		if (ccc & 0x001)
-			printf("0, ");
-		printf("\b\b\n");
-
-		mult = 1 << (c_size_mult + 2);
-		blocknr = (c_size + 1) * mult;
-		block_len = 1 << read_bl_len;
-		blocks = blocknr;
-		block_size = block_len;
-
-		memory_capacity = blocks * block_size;
-
-		printf("capacity: ");
-		if (memory_capacity / (1024ull * 1024ull * 1024ull) > 0)
-			printf("%.2fGbyte",
-			       memory_capacity / (1024.0 * 1024.0 * 1024.0));
-		else if (memory_capacity / (1024ull * 1024ull) > 0)
-			printf("%.2fMbyte", memory_capacity / (1024.0 * 1024.0));
-		else if (memory_capacity / (1024ull) > 0)
-			printf("%.2fKbyte", memory_capacity / (1024.0));
-		else
-			printf("%.2fbyte", memory_capacity * 1.0);
-		printf(" (%llu bytes, %llu sectors, %d bytes each)\n",
-		       memory_capacity, blocks, block_size);
+		print_mmc_csd_capacity(c_size, c_size_mult, read_bl_len);
 	}
 }
 
-char *speed_class_speed(unsigned char id, bool ddr)
-{
-	if (ddr) {
-		switch (id) {
-		case 0x00: return "<4.8MB/s";
-		case 0x08: return " 4.8MB/s";
-		case 0x0a: return " 6.0MB/s";
-		case 0x0f: return " 9.0MB/s";
-		case 0x14: return "12.0MB/s";
-		case 0x1e: return "18.0MB/s";
-		case 0x28: return "24.0MB/s";
-		case 0x32: return "30.0MB/s";
-		case 0x3c: return "36.0MB/s";
-		case 0x46: return "42.0MB/s";
-		case 0x50: return "48.0MB/s";
-		case 0x64: return "60.0MB/s";
-		case 0x78: return "72.0MB/s";
-		case 0x8c: return "84.0MB/s";
-		case 0xa0: return "96.0MB/s";
-		default: return "??.?MB/s";
-		}
-	} else {
-		switch (id) {
-		case 0x00: return "<2.4MB/s";
-		case 0x08: return " 2.4MB/s";
-		case 0x0a: return " 3.0MB/s";
-		case 0x0f: return " 4.5MB/s";
-		case 0x14: return " 6.0MB/s";
-		case 0x1e: return " 9.0MB/s";
-		case 0x28: return "12.0MB/s";
-		case 0x32: return "15.0MB/s";
-		case 0x3c: return "18.0MB/s";
-		case 0x46: return "21.0MB/s";
-		case 0x50: return "24.0MB/s";
-		case 0x64: return "30.0MB/s";
-		case 0x78: return "36.0MB/s";
-		case 0x8c: return "42.0MB/s";
-		case 0xa0: return "48.0MB/s";
-		default: return "??.?MB/s";
-		}
-	}
-}
-
-char speed_class_name(unsigned char id)
-{
-	switch (id) {
-	case 0x00: return '?';
-	case 0x08: return 'A';
-	case 0x0a: return 'B';
-	case 0x0f: return 'C';
-	case 0x14: return 'D';
-	case 0x1e: return 'E';
-	case 0x28: return 'F';
-	case 0x32: return 'G';
-	case 0x3c: return 'H';
-	case 0x46: return 'J';
-	case 0x50: return 'K';
-	case 0x64: return 'M';
-	case 0x78: return 'O';
-	case 0x8c: return 'R';
-	case 0xa0: return 'T';
-	default: return '?';
-	}
-}
-
-char *power_class_consumption(unsigned int id, bool volt360)
-{
-	if (volt360) {
-		switch (id) {
-		case 0x0: return "100-200mA";
-		case 0x1: return "120-220mA";
-		case 0x2: return "150-250mA";
-		case 0x3: return "180-280mA";
-		case 0x4: return "200-300mA";
-		case 0x5: return "220-320mA";
-		case 0x6: return "250-350mA";
-		case 0x7: return "300-400mA";
-		case 0x8: return "350-450mA";
-		case 0x9: return "400-500mA";
-		case 0xa: return "450-550mA";
-		default: return "reserved";
-		}
-	} else {
-		switch (id) {
-		case 0x0: return "65-130mA";
-		case 0x1: return "70-140mA";
-		case 0x2: return "80-160mA";
-		case 0x3: return "90-180mA";
-		case 0x4: return "100-200mA";
-		case 0x5: return "120-220mA";
-		case 0x6: return "140-240mA";
-		case 0x7: return "160-260mA";
-		case 0x8: return "180-280mA";
-		case 0x9: return "200-300mA";
-		case 0xa: return "250-350mA";
-		default: return "reserved";
-		}
-	}
-}
-
-char *sleep_consumption(unsigned int id)
-{
-	switch (id) {
-	case 0x00: return "not defined";
-	case 0x01: return "2uA";
-	case 0x02: return "4uA";
-	case 0x03: return "8uA";
-	case 0x04: return "16uA";
-	case 0x05: return "32uA";
-	case 0x06: return "64uA";
-	case 0x07: return "128uA";
-	case 0x08: return "0.256mA";
-	case 0x09: return "0.512mA";
-	case 0x0a: return "1.024mA";
-	case 0x0b: return "2.048mA";
-	case 0x0c: return "4.096mA";
-	case 0x0d: return "8.192mA";
-	default: return "reserved";
-	}
-}
-
-void print_sd_scr(struct config *config, char *scr)
+static void print_sd_scr(struct config *config, char *scr)
 {
 	unsigned int scr_structure;
 	unsigned int sd_spec;
@@ -2257,29 +2083,10 @@ void print_sd_scr(struct config *config, char *scr)
 	}
 }
 
-/* MMC/SD interface processing functions */
-void print_info(struct config *config, char *type,
-	char *cid, char *csd, char *scr, char *ext_csd)
+static int process_dir(struct config *config, enum REG_TYPE reg)
 {
-	printf("type: '%s'\n", type);
-
-	if (!strcmp(type, "SD") && cid)
-		print_sd_cid(config, cid);
-	else if (!strcmp(type, "MMC") && cid)
-		print_mmc_cid(config, cid);
-
-	if (!strcmp(type, "SD") && scr)
-		print_sd_scr(config, scr);
-
-	if (!strcmp(type, "MMC") && csd)
-		print_mmc_csd(config, csd);
-	else if (!strcmp(type, "SD") && csd)
-		print_sd_csd(config, csd);
-}
-
-int process_dir(struct config *config, enum REG_TYPE reg)
-{
-	char *type = NULL, *cid = NULL, *csd = NULL, *scr = NULL, *ext_csd = NULL;
+	char *type = NULL;
+	char *reg_content = NULL;
 	int ret = 0;
 
 	if (chdir(config->dir) < 0) {
@@ -2303,31 +2110,45 @@ int process_dir(struct config *config, enum REG_TYPE reg)
 		goto err;
 	}
 
+	config->bus = strcmp(type, "MMC") ? SD : MMC;
+
 	switch (reg) {
 	case CID:
-		cid = read_file("cid");
-		if (!cid) {
+		reg_content = read_file("cid");
+		if (!reg_content) {
 			fprintf(stderr,
 				"Could not read card identity in directory '%s'.\n",
 				config->dir);
 			ret = -1;
 			goto err;
 		}
+
+		if (config->bus == SD)
+			print_sd_cid(config, reg_content);
+		else
+			print_mmc_cid(config, reg_content);
+
 		break;
 	case CSD:
-		csd = read_file("csd");
-		if (!csd) {
+		reg_content = read_file("csd");
+		if (!reg_content) {
 			fprintf(stderr,
 				"Could not read card specific data in "
 				"directory '%s'.\n", config->dir);
 			ret = -1;
 			goto err;
 		}
+
+		if (config->bus == SD)
+			print_sd_csd(config, reg_content);
+		else
+			print_mmc_csd(config, reg_content);
+
 		break;
 	case SCR:
 		if (!strcmp(type, "SD")) {
-			scr = read_file("scr");
-			if (!scr) {
+			reg_content = read_file("scr");
+			if (!reg_content) {
 				fprintf(stderr, "Could not read SD card "
 					"configuration in directory '%s'.\n",
 					config->dir);
@@ -2335,126 +2156,65 @@ int process_dir(struct config *config, enum REG_TYPE reg)
 				goto err;
 			}
 		}
-		break;
-	case EXT_CSD:
-		if (!strcmp(type, "MMC")) {
-			ext_csd = read_file("ext_csd");
-			if (!ext_csd) {
-				fprintf(stderr, "Could not read extra specific "
-					"data in directory '%s'.\n",
-					config->dir);
-				ret = -1;
-				goto err;
-			}
-		}
+
+		print_sd_scr(config, reg_content);
+
 		break;
 	default:
 		goto err;
 	}
 
-	print_info(config, type, cid, csd, scr, ext_csd);
-
 err:
-	free(ext_csd);
-	free(scr);
-	free(csd);
-	free(cid);
+	free(reg_content);
 	free(type);
 
 	return ret;
 }
 
-int lsmmc_main(struct config *config, int argc, char **argv)
+static int do_read_reg(int argc, char **argv, enum REG_TYPE reg)
 {
+	struct config cfg = {};
 	int ret;
 
-	memset(config, 0, sizeof(*config));
-	config->mmc_ids = calloc(IDS_MAX, sizeof(char *));
-	config->sd_ids = calloc(IDS_MAX, sizeof(char *));
-	if (!config->mmc_ids || !config->sd_ids) {
-		fprintf(stderr, "Could not allocate memory for lsmmc.\n");
-		return -1;
-	}
-
-	ret = parse_opts(argc, argv, config);
+	ret = parse_opts(argc, argv, &cfg);
 	if (ret)
 		return ret;
 
-	return parse_ids(config);
-}
+	if (cfg.dir)
+		ret = process_dir(&cfg, reg);
 
-void lsmmc_free(struct config *config)
-{
-	free(config->mmc_ids);
-	free(config->sd_ids);
-	free(config->dir);
+	free(cfg.dir);
+
+	return ret;
+
 }
 
 int do_read_csd(int argc, char **argv)
 {
-	struct config config;
-	int ret;
-
 	if (argc != 2 && argc != 3) {
 		fprintf(stderr, "Usage: Print CSD data from <device path>.\n");
 		exit(1);
 	}
 
-	ret = lsmmc_main(&config, argc, argv);
-	if (ret)
-		goto out;
-
-	if (config.dir)
-		ret = process_dir(&config, CSD);
-
-out:
-	lsmmc_free(&config);
-
-	return ret;
+	return do_read_reg(argc, argv, CSD);
 }
 
 int do_read_cid(int argc, char **argv)
 {
-	struct config config;
-	int ret;
-
 	if (argc != 2 && argc != 3) {
 		fprintf(stderr, "Usage: Print CID data from <device path>.\n");
 		exit(1);
 	}
 
-	ret = lsmmc_main(&config, argc, argv);
-	if (ret)
-		goto out;
-
-	if (config.dir)
-		ret = process_dir(&config, CID);
-
-out:
-	lsmmc_free(&config);
-
-	return ret;
+	return do_read_reg(argc, argv, CID);
 }
 
 int do_read_scr(int argc, char **argv)
 {
-	struct config config;
-	int ret;
-
 	if (argc != 2 && argc != 3) {
 		fprintf(stderr, "Usage: Print SCR data from <device path>.\n");
 		exit(1);
 	}
 
-	ret = lsmmc_main(&config, argc, argv);
-	if (ret)
-		goto out;
-
-	if (config.dir)
-		ret = process_dir(&config, SCR);
-
-out:
-	lsmmc_free(&config);
-
-	return ret;
+	return do_read_reg(argc, argv, SCR);
 }
